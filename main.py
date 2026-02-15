@@ -65,7 +65,7 @@ def choose_email(matches):
         if m.get("date"):
             print(f"   Date: {m.get('date')}")
         if m.get("snippet"):
-            print(f"   Last snippet: {m.get('snippet')}")
+            print(f"   Last message: {m.get('snippet')}")
         print()
 
     while True:
@@ -114,7 +114,7 @@ def main():
 
         print("\n--- EMAIL SUBJECT ---")
         print(email_subject)
-        print("\nLatest message in thread:\n")
+        print("\n--- LATEST MESSAGE ---")
         print(email_body)
 
         ok = input("\nIs this the right email thread? [Y/n]: ").strip().lower()

@@ -20,12 +20,13 @@ from llm_client import generate_reply
 
 def nl_to_gmail_query(user_request: str) -> str:
     """
-    Convert natural language into a flexible Gmail query.
+    Convert natural language into a Gmail subject-only query.
 
     Strategy:
     - remove filler words
     - normalize punctuation/quotes/hyphens
     - keep meaningful keywords
+    - search ONLY in subject (avoid matching body text)
     - bias toward recent emails
     """
 
@@ -34,7 +35,8 @@ def nl_to_gmail_query(user_request: str) -> str:
     stopwords = {
         "the", "a", "an", "latest", "email", "i", "me", "my",
         "to", "for", "about", "regarding", "sent", "that",
-        "please", "help", "respond", "reply", "want", "need"
+        "please", "help", "respond", "reply", "want", "need",
+        "can", "you"
     }
 
     # Normalize punctuation/quotes/hyphens -> spaces, then tokenize
@@ -43,11 +45,15 @@ def nl_to_gmail_query(user_request: str) -> str:
 
     words = [w for w in tokens if w not in stopwords and len(w) > 2]
 
+    # Fallback: still subject-only, but recent.
+    # This avoids matching body content and keeps results tight.
     if not words:
-        return "newer_than:7d"
+        return "newer_than:30d"
 
-    keyword_query = " ".join(words)
-    return f"{keyword_query} newer_than:30d"
+    # Subject-only query:
+    # subject:(word1 word2 word3) means all terms are searched in the subject field.
+    subject_query = " ".join(words)
+    return f"subject:({subject_query}) newer_than:30d"
 
 
 # ---------- Safety review ----------
@@ -93,9 +99,9 @@ def approval_loop(subject: str, body: str, draft: str):
     while True:
         print("\n--- EMAIL SUBJECT ---")
         print(subject)
-        print("\nLatest message in thread:\n")
+        print("\n--- LATEST MESSAGE ---")
         print(body)
-        print("\n--- AI DRAFT ---")
+        print("\n--- AI SUGGESTED DRAFT ---")
         print(draft)
 
         print("\nOptions:")
