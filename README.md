@@ -68,7 +68,6 @@ Secrets are excluded from git:
 - `credentials.json`
 - `token.json`
 
-`credentials.json` was sent over email
 ---
 
 ## OAuth test access
