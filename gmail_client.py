@@ -21,7 +21,7 @@ Error-handling goals:
 import os
 import base64
 from email.message import EmailMessage
-
+import html
 from googleapiclient.errors import HttpError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -180,10 +180,21 @@ def get_header(message, name):
 
 # ---------- Email search ----------
 
-def search_emails(query, max_results=5):
+
+
+def search_emails(query, max_results=5, scan_limit=50):
     """
-    Searches Gmail using a Gmail query string.
-    Returns a list of matches (up to max_results) with subject/body/snippet metadata.
+    Searches Gmail using a Gmail query string and returns ONE result per thread.
+
+    Behavior:
+    - Gmail search can return multiple messages from the same thread.
+    - We de-dupe by threadId.
+    - For each thread, we keep the latest message (by internalDate).
+    - We scan up to `scan_limit` messages to find up to `max_results` unique threads.
+
+    Returns:
+      List[dict] where each dict includes:
+        subject, from, date, snippet, body, raw_message, thread_id, internal_date
     """
 
     try:
@@ -193,10 +204,11 @@ def search_emails(query, max_results=5):
         return []
 
     try:
+        # Pull a bigger pool so we can dedupe threads and still return N unique threads.
         results = service.users().messages().list(
             userId="me",
             q=query,
-            maxResults=max_results
+            maxResults=scan_limit
         ).execute()
     except HttpError as e:
         _print_http_error("search (messages.list)", e)
@@ -205,32 +217,54 @@ def search_emails(query, max_results=5):
         print(f"\nUnexpected error during Gmail search: {e}")
         return []
 
-    messages = results.get("messages", [])
-    if not messages:
+    message_refs = results.get("messages", [])
+    if not message_refs:
         return []
 
-    matches = []
+    # Keep only the latest message per thread
+    latest_by_thread = {}  # threadId -> match dict
 
-    for m in messages:
+    for ref in message_refs:
         try:
             msg = service.users().messages().get(
                 userId="me",
-                id=m["id"]
+                id=ref["id"]
             ).execute()
         except Exception:
+            # Skip any message we fail to fetch
             continue
 
-        matches.append({
+        thread_id = msg.get("threadId")
+        internal_date = int(msg.get("internalDate", "0"))  # milliseconds since epoch
+
+        match = {
             "subject": get_header(msg, "Subject") or "(no subject)",
             "from": get_header(msg, "From") or "(unknown sender)",
             "date": get_header(msg, "Date") or "",
-            "snippet": msg.get("snippet", ""),
+            # Snippet is sometimes HTML-escaped; unescape for nicer CLI output
+            "snippet": html.unescape(msg.get("snippet", "")),
             "body": extract_body(msg.get("payload", {})) or "",
-            "raw_message": msg
-        })
+            "raw_message": msg,
+            "thread_id": thread_id,
+            "internal_date": internal_date,
+        }
 
-    return matches
+        # If we already have a message for this thread, keep only the newer one
+        if thread_id in latest_by_thread:
+            if internal_date > latest_by_thread[thread_id]["internal_date"]:
+                latest_by_thread[thread_id] = match
+        else:
+            latest_by_thread[thread_id] = match
 
+    # Sort threads by newest message first
+    deduped = sorted(
+        latest_by_thread.values(),
+        key=lambda x: x["internal_date"],
+        reverse=True
+    )
+
+    # Return only the requested number of unique threads
+    return deduped[:max_results]
 
 # ---------- Sending emails ----------
 

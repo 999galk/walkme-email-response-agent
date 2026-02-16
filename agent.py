@@ -20,43 +20,60 @@ from llm_client import generate_reply
 
 def nl_to_gmail_query(user_request: str) -> str:
     """
-    Convert natural language into a Gmail subject-only query.
+    Natural language -> Gmail query (subject-only keywords + optional sender filter).
 
-    Strategy:
-    - remove filler words
-    - normalize punctuation/quotes/hyphens
-    - keep meaningful keywords
-    - search ONLY in subject (avoid matching body text)
-    - bias toward recent emails
+    Supports:
+    - "from dorin" / "from dorin@example.com" -> from:...
+    - Subject-only keyword matching by default
+    - Bias toward recent emails
     """
 
     text = user_request.lower().strip()
 
+    # Extract optional "from X" (name or email-ish token)
+    sender = None
+    m = re.search(r"\bfrom\s+([^\s]+)", text)
+    if m:
+        sender = m.group(1).strip().strip('"\'')
+
+        # remove the "from X" part from the text so it won't pollute keywords
+        text = re.sub(r"\bfrom\s+[^\s]+", " ", text).strip()
+
     stopwords = {
-        "the", "a", "an", "latest", "email", "i", "me", "my",
+        "the", "a", "an", "latest", "email","emails", "i", "me", "my",
         "to", "for", "about", "regarding", "sent", "that",
         "please", "help", "respond", "reply", "want", "need",
-        "can", "you"
+        "can", "you", "main"
     }
 
-    # Normalize punctuation/quotes/hyphens -> spaces, then tokenize
     cleaned = re.sub(r"[^a-z0-9]+", " ", text)
     tokens = cleaned.split()
-
     words = [w for w in tokens if w not in stopwords and len(w) > 2]
 
-    # Fallback: still subject-only, but recent.
-    # This avoids matching body content and keeps results tight.
-    if not words:
-        return "newer_than:30d"
+    # Base query parts
+    parts = []
 
-    # Subject-only query:
-    # subject:(word1 word2 word3) means all terms are searched in the subject field.
-    subject_query = " ".join(words)
-    return f"subject:({subject_query}) newer_than:30d"
+    # Optional sender filter
+    if sender:
+        parts.append(f"from:{sender}")
 
+    # Subject-only keyword filter (preferred)
+    if words:
+        parts.append(f"subject:({' '.join(words)})")
+    else:
+        # If no keywords, still limit by recency so results are manageable
+        parts.append("newer_than:30d")
+
+    # Recency bias
+    parts.append("newer_than:30d")
+
+    # Optional: exclude preview emails to reduce clutter
+    parts.append("-subject:[PREVIEW]")
+
+    return " ".join(parts)
 
 # ---------- Safety review ----------
+
 
 @dataclass
 class SafetyReview:
@@ -84,7 +101,8 @@ def safety_review(original_email: str, draft: str) -> SafetyReview:
         warnings.append("Original had questions but draft has none.")
 
     if re.search(r"\b\d{8,}\b", draft):
-        warnings.append("Contains long number sequence (possible sensitive ID).")
+        warnings.append(
+            "Contains long number sequence (possible sensitive ID).")
         high_risk = True
 
     return SafetyReview(warnings=warnings, high_risk=high_risk)
