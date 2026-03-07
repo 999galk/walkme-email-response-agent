@@ -1,38 +1,44 @@
 """
 gmail_client.py
 
-Responsible for:
+Low-level Gmail integration.
+
+Responsibilities:
 - Gmail OAuth authentication
 - Searching emails
+- Loading a selected thread
 - Extracting readable body text
 - Sending replies
 - Sending preview emails
 
-Design goals:
-- keep Gmail concerns isolated from business logic
-- allow swapping email provider later if needed
+Why keep this separate?
+- isolates provider/API details from orchestration
+- easier to swap later
+- easier to review and test independently
 
-Error-handling goals:
-- fail with clear, actionable messages (instead of stack traces)
-- treat external API calls (Google) as unreliable and handle common failures
-- return None / False on recoverable failures so the caller can decide next steps
+Error-handling policy:
+- configuration / API failures raise RuntimeError with clear messages
+- "no results" is not an error and returns an empty list / empty dict where appropriate
+- callers can distinguish real failures from valid empty search results
 """
 
-import os
+from __future__ import annotations
+
 import base64
-from email.message import EmailMessage
 import html
-from googleapiclient.errors import HttpError
+import os
+from email.message import EmailMessage
+from typing import Dict, List
+
+from dotenv import load_dotenv
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-
-from dotenv import load_dotenv
+from googleapiclient.errors import HttpError
 
 load_dotenv()
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
-
 CREDENTIALS_PATH = os.getenv("GMAIL_CREDENTIALS_PATH", "credentials.json")
 TOKEN_PATH = os.getenv("GMAIL_TOKEN_PATH", "token.json")
 
@@ -41,38 +47,35 @@ TOKEN_PATH = os.getenv("GMAIL_TOKEN_PATH", "token.json")
 
 def _print_http_error(context: str, e: HttpError) -> None:
     """
-    Print Google API errors in a reviewer-friendly way.
+    Print Google API errors in a readable way.
 
-    HttpError often contains JSON payload with details. We keep it readable,
-    and avoid crashing the entire app if the caller can recover.
+    We still raise after this in the calling function, but printing the API
+    payload helps during debugging and assignment review.
     """
     print(f"\nGmail API error during: {context}")
     try:
-        # e.content is bytes; can include structured JSON error details
-        content = e.content.decode("utf-8", errors="ignore") if hasattr(e, "content") and e.content else ""
-        if content:
-            print(content)
-        else:
-            print(str(e))
+        content = (
+            e.content.decode("utf-8", errors="ignore")
+            if hasattr(e, "content") and e.content
+            else ""
+        )
+        print(content or str(e))
     except Exception:
         print(str(e))
 
 
 def _ensure_credentials_file_exists() -> None:
     """
-    Ensures OAuth client credentials exist before attempting auth.
-
-    Without this, the code throws FileNotFoundError deep inside Google libs.
-    We instead raise a clear actionable message.
+    Fail early with a clear message if OAuth client credentials are missing.
     """
     if not os.path.exists(CREDENTIALS_PATH):
         raise RuntimeError(
             f"Missing Gmail OAuth credentials file: {CREDENTIALS_PATH}\n"
             "Fix:\n"
-            "1) Google Cloud Console → APIs & Services → Credentials\n"
+            "1) Google Cloud Console -> APIs & Services -> Credentials\n"
             "2) Create OAuth Client ID (Desktop App)\n"
             "3) Download JSON and place it in the repo root\n"
-            "4) Rename it to 'credentials.json' OR set GMAIL_CREDENTIALS_PATH in .env\n"
+            "4) Rename it to 'credentials.json' or set GMAIL_CREDENTIALS_PATH in .env\n"
         )
 
 
@@ -80,40 +83,34 @@ def _ensure_credentials_file_exists() -> None:
 
 def get_gmail_service():
     """
-    Creates an authenticated Gmail API client.
+    Create an authenticated Gmail API client.
 
-    Uses OAuth token caching:
-    - credentials.json = OAuth client secret (downloaded from Google Cloud)
-    - token.json = stored refresh token (generated after first consent)
+    OAuth flow:
+    - credentials.json = OAuth client configuration
+    - token.json = cached user token
 
-    First run opens browser for consent.
-    Future runs reuse token silently.
-
-    Error handling:
-    - if credentials.json is missing, raise a clear RuntimeError
-    - if token.json is corrupted, we warn and re-run OAuth flow
+    First run opens browser consent.
+    Future runs reuse the cached token.
     """
-
     _ensure_credentials_file_exists()
 
     creds = None
 
-    # 1) Load cached token if present
+    # Try cached token first.
     if os.path.exists(TOKEN_PATH):
         try:
             creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
         except Exception as e:
-            # Token file can be corrupted/partial. We can recover by re-authing.
-            print(f"\nWarning: Failed to read {TOKEN_PATH} (will re-auth). Details: {e}")
+            # Corrupted token is recoverable: re-authenticate.
+            print(f"\nWarning: Failed to read {TOKEN_PATH}. Re-authenticating. Details: {e}")
             creds = None
 
-    # 2) If no valid creds, do interactive OAuth flow (local server)
+    # Run OAuth flow if needed.
     if not creds or not creds.valid:
         try:
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
             creds = flow.run_local_server(port=0)
         except Exception as e:
-            # This could be consent-screen misconfiguration / blocked auth / network issue
             raise RuntimeError(
                 "Failed to complete Gmail OAuth flow.\n"
                 "Common fixes:\n"
@@ -123,15 +120,14 @@ def get_gmail_service():
                 f"\nDetails: {e}"
             ) from e
 
-        # 3) Persist token for future runs
+        # Persist token for next runs.
         try:
             with open(TOKEN_PATH, "w") as token:
                 token.write(creds.to_json())
         except Exception as e:
-            # Not fatal: the service still works in this run.
+            # Not fatal for the current run.
             print(f"\nWarning: Could not write token file {TOKEN_PATH}. Details: {e}")
 
-    # 4) Build Gmail API service client
     try:
         return build("gmail", "v1", credentials=creds)
     except Exception as e:
@@ -140,15 +136,12 @@ def get_gmail_service():
 
 # ---------- Email parsing ----------
 
-def extract_body(payload):
+def extract_body(payload: Dict) -> str:
     """
-    Recursively extracts text/plain body from MIME payload.
-    Gmail emails can be deeply nested.
+    Recursively extract the first text/plain body from a Gmail MIME payload.
 
-    Error handling:
-    - decode errors are handled gracefully (replace invalid bytes)
+    Many emails are nested multipart messages, so we walk down recursively.
     """
-
     if "parts" in payload:
         for part in payload["parts"]:
             result = extract_body(part)
@@ -161,15 +154,41 @@ def extract_body(payload):
             try:
                 return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
             except Exception:
-                # If decoding fails, return an empty string rather than crash.
                 return ""
 
     return ""
 
 
-def get_header(message, name):
+def trim_to_latest_message_only(body: str) -> str:
     """
-    Helper to read a header from Gmail message structure.
+    Try to keep only the newly written part of the latest email message,
+    trimming common quoted-reply separators.
+
+    This is heuristic-based, not perfect, but keeps threads much more readable.
+    """
+    if not body:
+        return ""
+
+    separators = [
+        "\nOn ",
+        "\nFrom:",
+        "\n-----Original Message-----",
+        "\n________________________________",
+        "\nSent from my iPhone",
+    ]
+
+    trimmed = body
+    for sep in separators:
+        idx = trimmed.find(sep)
+        if idx != -1:
+            trimmed = trimmed[:idx].strip()
+
+    return trimmed.strip()
+
+
+def get_header(message: Dict, name: str):
+    """
+    Read a header from the Gmail message structure.
     """
     headers = message.get("payload", {}).get("headers", [])
     for h in headers:
@@ -178,107 +197,179 @@ def get_header(message, name):
     return None
 
 
-# ---------- Email search ----------
+# ---------- Search / load ----------
 
-
-
-def search_emails(query, max_results=5, scan_limit=50):
+def search_emails(query: str, max_results: int = 5, scan_limit: int = 50) -> List[Dict]:
     """
-    Searches Gmail using a Gmail query string and returns ONE result per thread.
+    Search Gmail and return one result per thread.
 
-    Behavior:
-    - Gmail search can return multiple messages from the same thread.
-    - We de-dupe by threadId.
-    - For each thread, we keep the latest message (by internalDate).
-    - We scan up to `scan_limit` messages to find up to `max_results` unique threads.
+    Important behavior:
+    - Gmail search returns matching messages, not threads
+    - if any message in a thread matches, we fetch the full thread
+    - we return the latest message from that full thread, because that is what
+      the user will likely reply to
 
     Returns:
-      List[dict] where each dict includes:
-        subject, from, date, snippet, body, raw_message, thread_id, internal_date
+    - list of matches (possibly empty) on valid no-result searches
+    Raises:
+    - RuntimeError on Gmail initialization / API failures
     """
-
     try:
         service = get_gmail_service()
     except Exception as e:
-        print(f"\nFailed to initialize Gmail client: {e}")
-        return []
+        raise RuntimeError(f"Failed to initialize Gmail client: {e}") from e
 
     try:
-        # Pull a bigger pool so we can dedupe threads and still return N unique threads.
         results = service.users().messages().list(
             userId="me",
             q=query,
-            maxResults=scan_limit
+            maxResults=scan_limit,
         ).execute()
     except HttpError as e:
         _print_http_error("search (messages.list)", e)
-        return []
+        raise RuntimeError("Gmail API search failed.") from e
     except Exception as e:
-        print(f"\nUnexpected error during Gmail search: {e}")
-        return []
+        raise RuntimeError(f"Unexpected error during Gmail search: {e}") from e
 
     message_refs = results.get("messages", [])
     if not message_refs:
         return []
 
-    # Keep only the latest message per thread
-    latest_by_thread = {}  # threadId -> match dict
-
+    # Step 1: collect unique thread IDs from matched messages.
+    thread_ids = set()
     for ref in message_refs:
         try:
-            msg = service.users().messages().get(
-                userId="me",
-                id=ref["id"]
-            ).execute()
+            msg = service.users().messages().get(userId="me", id=ref["id"]).execute()
+            thread_id = msg.get("threadId")
+            if thread_id:
+                thread_ids.add(thread_id)
         except Exception:
-            # Skip any message we fail to fetch
+            # Skip individual fetch failures but continue with the rest.
             continue
 
-        thread_id = msg.get("threadId")
-        internal_date = int(msg.get("internalDate", "0"))  # milliseconds since epoch
+    if not thread_ids:
+        return []
+
+    matches: List[Dict] = []
+
+    # Step 2: for each matching thread, fetch full thread and keep latest message.
+    for thread_id in thread_ids:
+        try:
+            thread = service.users().threads().get(
+                userId="me",
+                id=thread_id,
+                format="full",
+            ).execute()
+        except Exception:
+            continue
+
+        messages = thread.get("messages", [])
+        if not messages:
+            continue
+
+        try:
+            latest = max(messages, key=lambda m: int(m.get("internalDate", "0")))
+            internal_date = int(latest.get("internalDate", "0"))
+        except Exception:
+            continue
 
         match = {
-            "subject": get_header(msg, "Subject") or "(no subject)",
-            "from": get_header(msg, "From") or "(unknown sender)",
-            "date": get_header(msg, "Date") or "",
-            # Snippet is sometimes HTML-escaped; unescape for nicer CLI output
-            "snippet": html.unescape(msg.get("snippet", "")),
-            "body": extract_body(msg.get("payload", {})) or "",
-            "raw_message": msg,
+            "subject": get_header(latest, "Subject") or "(no subject)",
+            "from": get_header(latest, "From") or "(unknown sender)",
+            "date": get_header(latest, "Date") or "",
+            "snippet": html.unescape(latest.get("snippet", "")),
+            "body": extract_body(latest.get("payload", {})) or "",
+            "raw_message": latest,
             "thread_id": thread_id,
             "internal_date": internal_date,
         }
+        matches.append(match)
 
-        # If we already have a message for this thread, keep only the newer one
-        if thread_id in latest_by_thread:
-            if internal_date > latest_by_thread[thread_id]["internal_date"]:
-                latest_by_thread[thread_id] = match
-        else:
-            latest_by_thread[thread_id] = match
-
-    # Sort threads by newest message first
-    deduped = sorted(
-        latest_by_thread.values(),
-        key=lambda x: x["internal_date"],
-        reverse=True
-    )
-
-    # Return only the requested number of unique threads
+    deduped = sorted(matches, key=lambda x: x["internal_date"], reverse=True)
     return deduped[:max_results]
 
-# ---------- Sending emails ----------
 
-def send_email(to_email, subject, body_text):
+def get_thread(thread_id: str) -> Dict:
     """
-    Sends standalone email (used for preview-to-self).
+    Fetch a Gmail thread and return the latest message in that thread.
 
-    Returns True on success, False on failure.
+    Returns:
+      {
+        "thread_id": str,
+        "subject": str,
+        "from": str,
+        "date": str,
+        "snippet": str,
+        "body": str,
+        "raw_message": dict,
+      }
+
+    Raises:
+    - RuntimeError on Gmail initialization / API failures
     """
     try:
         service = get_gmail_service()
     except Exception as e:
-        print(f"\nFailed to initialize Gmail client: {e}")
-        return False
+        raise RuntimeError(f"Failed to initialize Gmail client: {e}") from e
+
+    try:
+        thread = service.users().threads().get(
+            userId="me",
+            id=thread_id,
+            format="full",
+        ).execute()
+    except HttpError as e:
+        _print_http_error("get thread (threads.get)", e)
+        raise RuntimeError("Gmail API thread load failed.") from e
+    except Exception as e:
+        raise RuntimeError(f"Unexpected error during threads.get: {e}") from e
+
+    messages = thread.get("messages", [])
+    if not messages:
+        return {}
+
+    def _internal_date(message: Dict) -> int:
+        try:
+            return int(message.get("internalDate", "0"))
+        except Exception:
+            return 0
+
+    latest = max(messages, key=_internal_date)
+
+    subject = get_header(latest, "Subject") or "(no subject)"
+    sender = get_header(latest, "From") or "(unknown sender)"
+    date = get_header(latest, "Date") or ""
+    snippet = html.unescape(latest.get("snippet", "")) if latest.get("snippet") else ""
+    body = extract_body(latest.get("payload", {})) or ""
+    body = trim_to_latest_message_only(body)
+
+    return {
+        "thread_id": thread_id,
+        "subject": subject,
+        "from": sender,
+        "date": date,
+        "snippet": snippet,
+        "body": body,
+        "raw_message": latest,
+    }
+
+
+# ---------- Sending ----------
+
+def send_email(to_email: str, subject: str, body_text: str) -> bool:
+    """
+    Send a standalone email (used for preview-to-self).
+
+    Returns:
+    - True on success
+
+    Raises:
+    - RuntimeError on Gmail initialization / API failures
+    """
+    try:
+        service = get_gmail_service()
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize Gmail client: {e}") from e
 
     msg = EmailMessage()
     msg["To"] = to_email
@@ -290,35 +381,35 @@ def send_email(to_email, subject, body_text):
     try:
         sent = service.users().messages().send(
             userId="me",
-            body={"raw": raw}
+            body={"raw": raw},
         ).execute()
         print("Preview sent:", sent.get("id"))
         return True
     except HttpError as e:
         _print_http_error("send preview email (messages.send)", e)
-        return False
+        raise RuntimeError("Gmail API preview send failed.") from e
     except Exception as e:
-        print(f"\nUnexpected error while sending preview email: {e}")
-        return False
+        raise RuntimeError(f"Unexpected error while sending preview email: {e}") from e
 
 
-def send_reply(original_message, reply_body):
+def send_reply(original_message: Dict, reply_body: str) -> bool:
     """
-    Sends a threaded reply to original email.
-    Preserves conversation context (threadId + headers when available).
+    Send a threaded reply to the selected email.
 
-    Returns True on success, False on failure.
+    Returns:
+    - True on success
+
+    Raises:
+    - RuntimeError on Gmail initialization / API failures
     """
     try:
         service = get_gmail_service()
     except Exception as e:
-        print(f"\nFailed to initialize Gmail client: {e}")
-        return False
+        raise RuntimeError(f"Failed to initialize Gmail client: {e}") from e
 
     to_email = get_header(original_message, "From")
     if not to_email:
-        print("\nCannot send reply: original email is missing a From header.")
-        return False
+        raise RuntimeError("Cannot send reply: original email is missing a From header.")
 
     subject = get_header(original_message, "Subject") or ""
     if subject and not subject.lower().startswith("re:"):
@@ -342,19 +433,18 @@ def send_reply(original_message, reply_body):
 
     body = {
         "raw": raw,
-        "threadId": original_message.get("threadId")
+        "threadId": original_message.get("threadId"),
     }
 
     try:
         sent = service.users().messages().send(
             userId="me",
-            body=body
+            body=body,
         ).execute()
         print("Reply sent:", sent.get("id"))
         return True
     except HttpError as e:
         _print_http_error("send reply (messages.send)", e)
-        return False
+        raise RuntimeError("Gmail API reply send failed.") from e
     except Exception as e:
-        print(f"\nUnexpected error while sending reply: {e}")
-        return False
+        raise RuntimeError(f"Unexpected error while sending reply: {e}") from e

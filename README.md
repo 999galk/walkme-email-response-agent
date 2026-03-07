@@ -1,24 +1,37 @@
 # WalkMe Email Response Agent
+
 Home assignment for the WalkMe AI Solution Engineer position.
 
-A CLI agent that:
+This project is a CLI-based AI email assistant that can:
 
-1. Searches Gmail using natural language
-2. Shows up to the last 5 matching emails
-3. Lets the user choose the correct thread (or re-search)
-4. Displays the latest message in that thread
-5. Generates a reply using OpenAI
-6. Requires user approval (edit/regenerate/cancel)
-7. Supports preview-to-self (dry run)
-8. Runs safety checks before external send
-9. Sends only after explicit confirmation
+1. Understand which email the user wants to respond to
+2. Search Gmail using natural language
+3. Show matching threads and let the user choose the correct one
+4. Load the latest message from the selected thread
+5. Generate a reply draft using OpenAI
+6. Keep a human in the loop for approval and editing
+7. Allow preview-to-self before sending
+8. Run safety checks before external send
+9. Send only after explicit confirmation
 
-The goal is to demonstrate practical AI-assisted automation with:
+---
 
-- safe credential handling
-- human-in-the-loop controls
-- failure-aware design
-- reproducible runtime setup
+## WHY THIS IS AGENTIC
+
+The system is implemented as an LLM-orchestrated agent.
+
+The LLM is responsible for deciding when to:
+
+- convert natural language into a Gmail search query
+- trigger Gmail search
+- ask clarification questions when needed
+- present candidate emails for selection
+
+Once the correct email thread is selected, the flow becomes deterministic:
+
+load thread → generate draft → human approval → safety checks → preview/send
+
+This design demonstrates safe AI automation with real external systems.
 
 ---
 
@@ -118,11 +131,11 @@ python main.py
 Flow:
 
 1) Describe the email in natural language  
-   e.g. `"project proposal follow-up"`
+   e.g. `"walkme home assignment"`
 
 2) Agent converts text → Gmail query
 
-3) Up to **5 matching emails are shown**
+3) Up to **3 matching emails are shown from past 14 day**
 
 4) User selects the correct thread  
    or chooses to re-search
@@ -183,7 +196,7 @@ Edit a draft and include one of:
 ```
 https://example.com
 I confirm this is approved.
-Reference: 123456789012
+payment : 123456789012
 ```
 
 Then attempt to send — warnings should appear.
@@ -247,59 +260,202 @@ The approval loop remains active so the user can retry or edit manually.
 
 ---
 
-## Key libraries
+## TESTING SUPPORT
 
-- `google-api-python-client`, `google-auth`, `google-auth-oauthlib`  
-  Gmail OAuth + API access
+You can simulate failures to test error handling.
 
-- `python-dotenv`  
-  Local secret management
+Example:
 
-- `openai`  
-  Draft reply generation
+FORCE_DRAFT_ERROR=1 python main.py
+
+This allows testing:
+
+OpenAI draft failure  
+fallback behavior
 
 ---
 
-## Repository structure
+# PROJECT STRUCTURE
 
-```
-main.py         → CLI orchestration
-gmail_client.py → Gmail OAuth/search/parsing/sending
-llm_client.py   → OpenAI wrapper
-agent.py        → approval loop + safety logic
-```
+walkme-email-response-agent/
+
+main.py
+gmail_client.py
+requirements.txt
+README.md
+.env.example
+
+llm/
+    client.py
+    prompts.py
+
+runtime/
+    orchestrator.py
+    state.py
+    ui.py
+
+tools/
+    drafting.py
+    gmail_tools.py
+    query.py
+    safety.py
+
+
+## FILE RESPONSIBILITIES
+
+### main.py  
+Entry point of the application.
+
+Initializes:
+- Gmail client
+- OpenAI client
+- agent runtime
+
+Then launches the CLI interaction loop.
+
+### gmail_client.py  
+Handles all Gmail API communication.
+
+Responsibilities:
+
+- OAuth authentication
+- Gmail search queries
+- thread retrieval
+- message parsing
+- preview email sending
+- reply sending
+
+This file isolates Google API logic from the agent runtime.
+
+### llm/client.py  
+Wrapper around the OpenAI SDK.
+
+Used for:
+
+- agent tool-calling turns
+- reply draft generation
+
+Includes explicit error handling for OpenAI failures.
+
+### llm/prompts.py  
+Contains the system prompt used by the agent.
+
+Defines rules such as:
+
+- search-first behavior
+- limited clarification questions
+- safety constraints
+- draft formatting
+
+### runtime/orchestrator.py  
+Core agent runtime loop.
+
+Responsible for:
+
+- maintaining agent state
+- executing tool calls
+- managing search → select → draft → approve flow
+- handling error recovery
+
+### runtime/state.py  
+Stores session state such as:
+
+- search results
+- selected thread
+- generated draft
+- user context
+
+### runtime/ui.py  
+CLI interaction layer.
+
+Handles:
+
+- candidate display
+- selection menus
+- approval loop
+- regeneration prompts
+- confirmation steps
+
+### tools/query.py  
+Converts natural language into Gmail search queries.
+
+Includes logic for:
+
+- sender detection
+- keyword extraction
+- default time windows
+- fallback strategies
+
+### tools/gmail_tools.py  
+Structured wrappers around Gmail operations.
+
+Examples:
+
+- searching email threads
+- fetching the latest message
+- normalizing message output
+
+### tools/drafting.py  
+Handles reply generation with OpenAI.
+
+Features:
+
+- deterministic prompt construction
+- regeneration support
+- failure handling
+
+If generation fails, the previous draft is preserved.
+
+### tools/safety.py  
+Runs pre-send safety checks.
+
+Examples:
+
+- commitment/legal wording
+- links in the draft
+- long number sequences
+- system error text leakage
+- unanswered questions
+
+If warnings exist, explicit confirmation is required before sending.
 
 ---
 
 ## Troubleshooting
 
-### Browser does not open
+
+### Missing Gmail credentials
+
+Error:
+
+Missing Gmail OAuth credentials file
+
+Fix:
+
+Place credentials.json in the project root or update .env
+
+
+### Reset Gmail authentication
+
+rm token.json
+python main.py
+
+
+### OpenAI draft failure
 
 Check:
 
-- `credentials.json` exists in repo root
-- `.env` paths are correct
+API key is valid  
+billing enabled  
+FORCE_DRAFT_ERROR not set
 
-### Need to re-auth Gmail
 
-```bash
-rm token.json
-python main.py
-```
+### Preview/send failure
 
-### Authentication 403 error
+Possible causes:
 
-Add your Gmail under:
+Gmail authentication issue  
+network interruption  
+invalid thread state
 
-```
-OAuth consent screen → Test users
-```
-
----
-
-## Python version note
-
-Developed with Python 3.12.  
-Python 3.10+ recommended.
-
-Older Python versions may show deprecation warnings from Google libraries.
+The system will never claim an email was sent if the Gmail API fails.
