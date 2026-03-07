@@ -8,7 +8,6 @@ They are plain runtime/UI helpers for:
 - candidate selection
 - draft approval
 - send confirmation
-
 """
 
 from __future__ import annotations
@@ -18,16 +17,19 @@ from typing import Dict, List, Optional
 
 def choose_candidate(candidates: List[Dict]) -> Dict[str, Optional[str]]:
     """
-    Show candidate emails and let the user pick one.
+    Show candidate emails and let the user either:
+    - choose one by number
+    - type a new natural-language search request
 
-    Returns:
-    - {"chosen_thread_id": "<id>"} if selected
-    - {"chosen_thread_id": None} if user chooses re-search
+    Returns one of:
+    - {"action": "select", "chosen_thread_id": "<id>"}
+    - {"action": "research", "new_request": "<text>"}
+    - {"action": "cancel"}
     """
     if not candidates:
-        return {"chosen_thread_id": None}
+        return {"action": "cancel"}
 
-    print("\nI found a few emails that might match what you're looking for:\n")
+    print("\nI found a few emails that might match:\n")
     for i, c in enumerate(candidates, start=1):
         print(f"{i}) {c.get('subject', '(no subject)')}")
         print(f"   From: {c.get('from', '(unknown sender)')}")
@@ -37,18 +39,33 @@ def choose_candidate(candidates: List[Dict]) -> Dict[str, Optional[str]]:
             print(f"   Last message: {c.get('snippet')}")
         print()
 
-    while True:
-        choice = input(f"Which one looks right?\nPlease enter the number of the email you want to open, or type 'r' to re-search.\n").strip().lower()
+    print(
+        "Which one looks right?\n"
+        "Enter a number, or describe the email differently and I’ll search again.\n"
+        "Press Enter to cancel."
+    )
 
-        if choice == "r":
-            return {"chosen_thread_id": None}
+    while True:
+        choice = input("> ").strip()
+
+        if not choice:
+            return {"action": "cancel"}
 
         if choice.isdigit():
             idx = int(choice)
             if 1 <= idx <= len(candidates):
-                return {"chosen_thread_id": candidates[idx - 1].get("thread_id")}
+                return {
+                    "action": "select",
+                    "chosen_thread_id": candidates[idx - 1].get("thread_id"),
+                }
 
-        print("Invalid choice. Try again.")
+            print("That number is not in the list. Try again.")
+            continue
+
+        return {
+            "action": "research",
+            "new_request": choice,
+        }
 
 
 def approval_menu(
@@ -64,6 +81,10 @@ def approval_menu(
     UX behavior:
     - On first display: show subject, latest message, and draft
     - On later iterations (e.g. regenerate): show only the latest draft
+
+    Returns:
+    - approved/edited draft string
+    - None if cancelled
     """
     draft = current_draft
     first_view = True
@@ -78,11 +99,11 @@ def approval_menu(
             first_view = False
 
         print("\nHere’s a reply I drafted based on that message:")
-        print("\n---\n",draft,"\n---\n")
+        print(f"\n---\n{draft}\n---\n")
 
-        print("\nWhat would you like to do with this draft?:")
-        print("1) Looks good — approve it")
-        print("2) I want to edit it myself")
+        print("What would you like to do with this draft?")
+        print("1) Approve it")
+        print("2) Edit it myself")
         print("3) Generate another version")
         print("4) Cancel")
 
@@ -92,39 +113,40 @@ def approval_menu(
             return draft
 
         if choice == "2":
-            edited = input("Paste edited draft:\n").strip()
+            edited = input("Paste your edited draft:\n> ").strip()
             if edited:
                 draft = edited
             else:
-                print("The draft was empty, I'm going to keep previous version.")
+                print("The edited draft was empty. Keeping the previous version.")
             continue
 
         if choice == "3":
             instruction = input(
-                "How should I adjust the reply? e.g. shorter / more formal / friendlier\n> "
+                "How should I adjust the reply? For example: shorter / more formal / warmer\n> "
             ).strip()
+
+            if not instruction:
+                print("Please tell me how you want the draft adjusted.")
+                continue
+
             regenerated = regenerate_fn(instruction)
             if regenerated:
                 draft = regenerated
             else:
-                print("Regeneration failed. I'm going to keep previous draft.")
+                print("Regeneration failed. Keeping the previous draft.")
             continue
 
         if choice == "4":
             return None
 
-        print("I do not recognize this choice, please choose an option from the menu")
+        print("I do not recognize that choice. Please choose one of the menu options.")
+
 
 def post_approval_menu() -> str:
     """
     Next action after a draft is approved.
+    Keeps asking until the user enters a valid option.
     """
-    print("\nGreat! What should I do next?")
-    print("1) Send a preview email to myself")
-    print("2) Send the reply to the original email")
-    print("3) Go back to editing")
-    print("4) Cancel")
-
     mapping = {
         "1": "preview",
         "2": "send",
@@ -132,7 +154,19 @@ def post_approval_menu() -> str:
         "4": "cancel",
     }
 
-    return mapping.get(input("> ").strip(), "edit")
+    while True:
+        print("\nGreat. What should I do next?")
+        print("1) Send a preview email to myself")
+        print("2) Send the reply to the original email")
+        print("3) Go back to editing")
+        print("4) Cancel")
+
+        choice = input("> ").strip()
+
+        if choice in mapping:
+            return mapping[choice]
+
+        print("I do not recognize that choice. Please choose one of the menu options.")
 
 
 def require_send_confirmation(review) -> bool:
@@ -142,12 +176,64 @@ def require_send_confirmation(review) -> bool:
     If warnings exist, require a stronger confirmation phrase.
     """
     if not review.warnings:
-        confirm = input("Send now? [y/N]: ").strip().lower()
-        return confirm == "y"
+        while True:
+            confirm = input("Send now? [y/N]: ").strip().lower()
 
-    print("\n⚠️ Before sending, I noticed a few things you might want to double-check:")
+            if confirm in {"y", "yes"}:
+                return True
+
+            if confirm in {"", "n", "no"}:
+                return False
+
+            print("Please answer with 'y' or 'n'.")
+
+    print("\nBefore sending, I noticed a few things you may want to double-check:")
     for warning in review.warnings:
         print(f"- {warning}")
 
-    print("\nIf you're comfortable sending it anyway, type SEND.\nOtherwise you can go back and edit the draft.")
-    return input("> ").strip() == "SEND"
+    print(
+        "\nIf you're comfortable sending it anyway, type SEND.\n"
+        "Otherwise, type BACK to return to editing."
+    )
+
+    while True:
+        confirm = input("> ").strip()
+
+        if confirm == "SEND":
+            return True
+
+        if confirm.upper() == "BACK" or not confirm:
+            return False
+
+        print("Please type SEND to continue, or BACK to return to editing.")
+
+
+def prompt_new_search() -> Optional[str]:
+    """
+    Ask the user for a fresh natural-language email description.
+    """
+    answer = input(
+        "\nOkay, describe the email again with different keywords.\n"
+        "Press Enter to cancel.\n> "
+    ).strip()
+    return answer or None
+
+
+def prompt_restart_or_exit() -> str:
+    """
+    Standard recovery menu for retryable fatal situations.
+    """
+    while True:
+        print("\nWhat would you like to do?")
+        print("1) Start over")
+        print("2) Exit")
+
+        choice = input("> ").strip()
+
+        if choice == "1":
+            return "restart"
+
+        if choice == "2" or not choice:
+            return "exit"
+
+        print("I do not recognize that choice. Please choose 1 or 2.")

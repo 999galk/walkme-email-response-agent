@@ -11,6 +11,59 @@ from typing import Any, Dict, List
 from gmail_client import get_thread, search_emails, send_email, send_reply
 from tools.result import ok, err
 
+def _friendly_gmail_error(
+    *,
+    step: str,
+    technical_message: str,
+    raw_error: Any = None,
+) -> Dict[str, Any]:
+    """
+    Normalize Gmail/tool errors into:
+    - message: internal technical summary
+    - user_message: friendly CLI message
+    """
+    lower_msg = (technical_message or "").lower()
+
+    if "invalid to header" in lower_msg:
+        user_message = (
+            "That email address does not look valid. "
+            "Please enter a real email address for the preview."
+        )
+    elif "auth" in lower_msg or "permission" in lower_msg or "unauthorized" in lower_msg:
+        user_message = (
+            "I couldn't access Gmail for that action. "
+            "Please re-authorize and try again."
+        )
+    elif "rate limit" in lower_msg or "quota" in lower_msg:
+        user_message = (
+            "Gmail is temporarily limiting requests right now. "
+            "Please try again in a moment."
+        )
+    else:
+        if step == "preview_send":
+            user_message = (
+                "I couldn’t send the preview email. "
+                "Please check the address and try again."
+            )
+        elif step == "thread_reply_send":
+            user_message = (
+                "I couldn’t send the reply just now. "
+                "Please try again."
+            )
+        else:
+            user_message = (
+                "Something went wrong while talking to Gmail. "
+                "Please try again."
+            )
+
+    return {
+        "type": "gmail_api_error",
+        "step": step,
+        "message": technical_message,
+        "user_message": user_message,
+        "retryable": True,
+        "raw_error": raw_error,
+    }
 
 def gmail_search(query: str, max_results: int = 5) -> Dict[str, Any]:
     """
