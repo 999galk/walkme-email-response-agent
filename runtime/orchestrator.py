@@ -137,6 +137,7 @@ def _friendly_error_message(error: Optional[Dict[str, Any]], fallback: str) -> s
     return (
         error.get("user_message")
         or error.get("friendly_message")
+        or error.get("error_message")
         or fallback
     )
 
@@ -161,12 +162,6 @@ def _technical_error_details(error: Optional[Dict[str, Any]]) -> Optional[str]:
 
 
 def _fatal_error(message: str, *, details: str | None = None, debug: bool = False) -> None:
-    """
-    Show a user-friendly error message.
-
-    `message` should be safe and natural for end users.
-    `details` can contain technical information for debugging.
-    """
     print(f"\n{message}")
     print("No email was sent.")
 
@@ -176,11 +171,6 @@ def _fatal_error(message: str, *, details: str | None = None, debug: bool = Fals
 
 
 def _ensure_recent_window(query: str, days: int) -> str:
-    """
-    Enforce a default recent time window unless the query already has one.
-
-    This improves performance and relevance for common searches.
-    """
     q = (query or "").strip()
     lowered = q.lower()
 
@@ -307,7 +297,12 @@ def _run_post_draft_flow(state: AgentState) -> None:
 
         if action == "preview":
             while True:
-                my_email = input("Where should I send the preview?\n> ").strip()
+                my_email = input(
+                    "Where should I send the preview email?\n"
+                    "Enter a valid email address (e.g. you@example.com).\n"
+                    "Press Enter to return to editing.\n"
+                    "> "
+                ).strip()
 
                 if not my_email:
                     print("Okay — I’ll take you back to the draft.")
@@ -626,7 +621,7 @@ def run() -> None:
                 _fatal_error(
                     _friendly_error_message(
                         error,
-                        "I ran into a problem while deciding the next step.",
+                        "I couldn't reach the AI service that powers this assistant. Please check your OpenAI setup and try again.",
                     ),
                     details=_technical_error_details(error),
                     debug=DEBUG_ERRORS,

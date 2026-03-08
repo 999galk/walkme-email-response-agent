@@ -45,13 +45,15 @@ TOKEN_PATH = os.getenv("GMAIL_TOKEN_PATH", "token.json")
 
 # ---------- Helpers ----------
 
+DEBUG_GMAIL_ERRORS = False
+
 def _print_http_error(context: str, e: HttpError) -> None:
     """
-    Print Google API errors in a readable way.
-
-    We still raise after this in the calling function, but printing the API
-    payload helps during debugging and assignment review.
+    Debug-only logging for raw Gmail API payloads.
     """
+    if not DEBUG_GMAIL_ERRORS:
+        return
+
     print(f"\nGmail API error during: {context}")
     try:
         content = (
@@ -62,7 +64,6 @@ def _print_http_error(context: str, e: HttpError) -> None:
         print(content or str(e))
     except Exception:
         print(str(e))
-
 
 def _ensure_credentials_file_exists() -> None:
     """

@@ -41,15 +41,11 @@ if not OPENAI_API_KEY:
         "OPENAI_API_KEY=your_key_here"
     )
 
-# The official Python SDK expects API keys to be loaded server-side.
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 @dataclass
 class LLMResult:
-    """
-    Standard structured result for a Responses API turn.
-    """
     ok: bool
     response_id: Optional[str] = None
     output_text: str = ""
@@ -60,12 +56,43 @@ class LLMResult:
 
 @dataclass
 class DraftResult:
-    """
-    Structured result for draft generation.
-    """
     ok: bool
     draft: Optional[str] = None
     error: Optional[Dict[str, Any]] = None
+
+
+def _friendly_openai_error(exception: Exception, *, step: str) -> Dict[str, Any]:
+    message = str(exception)
+    lowered = message.lower()
+
+    if "api key" in lowered or "authentication" in lowered or "unauthorized" in lowered:
+        user_message = (
+            "I couldn't authenticate with the AI service. "
+            "Please check that your OPENAI_API_KEY is set correctly."
+        )
+    elif "connection" in lowered or "network" in lowered or "timeout" in lowered:
+        user_message = (
+            "I couldn't reach the AI service right now. "
+            "Please check your internet connection and try again."
+        )
+    elif "rate limit" in lowered or "quota" in lowered or "429" in lowered:
+        user_message = (
+            "The AI service is temporarily busy. "
+            "Please wait a moment and try again."
+        )
+    else:
+        user_message = (
+            "I couldn't connect to the AI service that powers this assistant. "
+            "Please check your OpenAI setup and try again."
+        )
+
+    return {
+        "type": "openai_error",
+        "message": message,
+        "user_message": user_message,
+        "retryable": True,
+        "step": step,
+    }
 
 
 def run_llm_turn(
@@ -75,17 +102,6 @@ def run_llm_turn(
     tools: List[Dict[str, Any]],
     previous_response_id: Optional[str] = None,
 ) -> LLMResult:
-    """
-    Run one Responses API turn.
-
-    Correct pattern:
-    - send user/system context and tool definitions
-    - model may return function_call items
-    - caller executes those tools
-    - caller sends function_call_output items in the next turn with previous_response_id
-
-    Returns a structured result so the orchestrator can safely continue or recover.
-    """
     try:
         resp = client.responses.create(
             model=model,
@@ -114,11 +130,7 @@ def run_llm_turn(
     except Exception as e:
         return LLMResult(
             ok=False,
-            error={
-                "type": "openai_error",
-                "message": str(e),
-                "retryable": True,
-            },
+            error=_friendly_openai_error(e, step="run_llm_turn"),
         )
 
 
@@ -129,18 +141,6 @@ def generate_draft_text(
     instructions: str = "",
     model: str = DEFAULT_MODEL,
 ) -> DraftResult:
-    """
-    Generate a professional email reply draft as plain text.
-
-    This helper is intentionally separate from the tool-calling loop because:
-    - drafting is a deterministic sub-task once the correct thread is selected
-    - it keeps the orchestration logic simpler
-    - it avoids having to make the model decide an obvious next step
-
-    Important:
-    - on failure, returns structured error
-    - does NOT return a fallback draft string
-    """
     extra = f"\nAdditional user instruction: {instructions}\n" if instructions else ""
 
     prompt = f"""
@@ -175,6 +175,8 @@ Reply:
                 error={
                     "type": "empty_draft",
                     "message": "Model returned an empty draft.",
+                    "user_message": "I couldn't generate a reply draft just now.",
+                    "step": "generate_draft_text",
                 },
             )
 
@@ -183,8 +185,5 @@ Reply:
     except Exception as e:
         return DraftResult(
             ok=False,
-            error={
-                "type": "openai_error",
-                "message": str(e),
-            },
+            error=_friendly_openai_error(e, step="generate_draft_text"),
         )

@@ -11,59 +11,72 @@ from typing import Any, Dict, List
 from gmail_client import get_thread, search_emails, send_email, send_reply
 from tools.result import ok, err
 
-def _friendly_gmail_error(
-    *,
-    step: str,
-    technical_message: str,
-    raw_error: Any = None,
-) -> Dict[str, Any]:
-    """
-    Normalize Gmail/tool errors into:
-    - message: internal technical summary
-    - user_message: friendly CLI message
-    """
-    lower_msg = (technical_message or "").lower()
 
-    if "invalid to header" in lower_msg:
+def _friendly_gmail_error(message: str, *, step: str) -> Dict[str, Any]:
+    """
+    Convert low-level Gmail/client errors into user-facing messages.
+
+    The orchestrator should stay generic and display `user_message` when present.
+    """
+    raw_message = str(message or "")
+    lowered = raw_message.lower()
+
+    # Missing / renamed OAuth credentials file
+    if "missing gmail oauth credentials file" in lowered or "credentials.json" in lowered:
         user_message = (
-            "That email address does not look valid. "
+            "I couldn't access Gmail because the OAuth credentials file is missing.\n"
+            "Please make sure your Gmail credentials JSON is in the expected location.\n"
+        )
+
+    # OAuth / auth flow problems
+    elif "failed to complete gmail oauth flow" in lowered:
+        user_message = (
+            "I couldn't complete Gmail authorization.\n"
+            "Please check your Google Cloud OAuth setup and try again."
+        )
+
+    elif "failed to initialize gmail client" in lowered:
+        user_message = (
+            "I couldn't initialize the Gmail connection.\n"
+            "Please check your Gmail OAuth configuration and try again."
+        )
+
+    # Permissions / access / auth issues
+    elif "unauthorized" in lowered or "permission" in lowered or "forbidden" in lowered:
+        user_message = (
+            "I don't currently have permission to access Gmail for that action.\n"
+            "Please re-authorize the app and try again."
+        )
+
+    # Invalid preview address
+    elif "invalid to header" in lowered:
+        user_message = (
+            "That email address doesn't look valid.\n"
             "Please enter a real email address for the preview."
         )
-    elif "auth" in lower_msg or "permission" in lower_msg or "unauthorized" in lower_msg:
+
+    # Quota / rate limits
+    elif "quota" in lowered or "rate limit" in lowered or "429" in lowered:
         user_message = (
-            "I couldn't access Gmail for that action. "
-            "Please re-authorize and try again."
+            "Gmail is temporarily limiting requests right now.\n"
+            "Please wait a moment and try again."
         )
-    elif "rate limit" in lower_msg or "quota" in lower_msg:
-        user_message = (
-            "Gmail is temporarily limiting requests right now. "
-            "Please try again in a moment."
-        )
+
     else:
-        if step == "preview_send":
-            user_message = (
-                "I couldn’t send the preview email. "
-                "Please check the address and try again."
-            )
-        elif step == "thread_reply_send":
-            user_message = (
-                "I couldn’t send the reply just now. "
-                "Please try again."
-            )
-        else:
-            user_message = (
-                "Something went wrong while talking to Gmail. "
-                "Please try again."
-            )
+        default_map = {
+            "search": "I couldn't search Gmail right now.",
+            "load_thread": "I couldn't open that email thread.",
+            "send_preview": "I couldn't send the preview email.",
+            "send_reply": "I couldn't send the reply just now.",
+        }
+        user_message = default_map.get(step, "Something went wrong while talking to Gmail.")
 
     return {
-        "type": "gmail_api_error",
-        "step": step,
-        "message": technical_message,
+        "message": raw_message,
         "user_message": user_message,
-        "retryable": True,
-        "raw_error": raw_error,
+        "step": step,
     }
+
 
 def gmail_search(query: str, max_results: int = 5) -> Dict[str, Any]:
     """
@@ -76,9 +89,15 @@ def gmail_search(query: str, max_results: int = 5) -> Dict[str, Any]:
     try:
         matches = search_emails(query, max_results=max_results)
     except Exception as e:
-        return err("gmail_search_failed", str(e), retryable=True)
+        friendly = _friendly_gmail_error(str(e), step="search")
+        return err(
+            "gmail_search_failed",
+            friendly["message"],
+            retryable=True,
+            user_message=friendly["user_message"],
+            step=friendly["step"],
+        )
 
-    # If gmail_client returned [] because no messages matched, that's not an API error.
     candidates: List[Dict[str, Any]] = []
     for m in matches:
         candidates.append(
@@ -101,13 +120,22 @@ def load_thread(thread_id: str) -> Dict[str, Any]:
     try:
         thread = get_thread(thread_id)
     except Exception as e:
-        return err("gmail_thread_load_failed", str(e), retryable=True)
+        friendly = _friendly_gmail_error(str(e), step="load_thread")
+        return err(
+            "gmail_thread_load_failed",
+            friendly["message"],
+            retryable=True,
+            user_message=friendly["user_message"],
+            step=friendly["step"],
+        )
 
     if not thread:
         return err(
             "gmail_thread_load_failed",
             "Failed to load selected thread.",
             retryable=True,
+            user_message="I couldn't open that email thread.",
+            step="load_thread",
         )
 
     return ok(thread=thread)
@@ -120,13 +148,22 @@ def send_preview_email(to_email: str, subject: str, body_text: str) -> Dict[str,
     try:
         sent = send_email(to_email, subject, body_text)
     except Exception as e:
-        return err("gmail_preview_send_failed", str(e), retryable=True)
+        friendly = _friendly_gmail_error(str(e), step="send_preview")
+        return err(
+            "gmail_preview_send_failed",
+            friendly["message"],
+            retryable=True,
+            user_message=friendly["user_message"],
+            step=friendly["step"],
+        )
 
     if not sent:
         return err(
             "gmail_preview_send_failed",
             "Preview email failed to send.",
             retryable=True,
+            user_message="I couldn't send the preview email.",
+            step="send_preview",
         )
 
     return ok(sent=True)
@@ -139,13 +176,22 @@ def send_thread_reply(original_message: Dict[str, Any], reply_body: str) -> Dict
     try:
         sent = send_reply(original_message, reply_body)
     except Exception as e:
-        return err("gmail_reply_send_failed", str(e), retryable=True)
+        friendly = _friendly_gmail_error(str(e), step="send_reply")
+        return err(
+            "gmail_reply_send_failed",
+            friendly["message"],
+            retryable=True,
+            user_message=friendly["user_message"],
+            step=friendly["step"],
+        )
 
     if not sent:
         return err(
             "gmail_reply_send_failed",
             "Reply failed to send.",
             retryable=True,
+            user_message="I couldn't send the reply just now.",
+            step="send_reply",
         )
 
     return ok(sent=True)
