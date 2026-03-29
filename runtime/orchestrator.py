@@ -396,7 +396,7 @@ def _handle_gmail_search(
     query = _ensure_recent_window(query, state.search_window_days)
     max_results = int(args.get("max_results") or 3)
 
-    print(f"\n[Search] Looking through the last {state.search_window_days} days...")
+    print(f"\n[Search] Looking through your emails...")
     state.set_gmail_query(query)
 
     res = gmail_search(query=query, max_results=max_results)
